@@ -5,7 +5,7 @@ import os
 import joblib
 import numpy as np
 from preprocessing import clean_text
-from rq import Worker, Connection
+from rq import Queue
 import redis
 from datetime import datetime
 import logging
@@ -16,52 +16,49 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app) 
 
+# Simple Redis connection (no encoding issues)
 try:
-    redis_conn = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    redis_conn = redis.Redis(host='localhost', port=6379)
     redis_conn.ping()
     logger.info("Successfully connected to Redis")
+    sentiment_queue = Queue('sentiment_analysis', connection=redis_conn)
 except Exception as e:
     logger.error(f"Failed to connect to Redis: {e}")
     redis_conn = None
+    sentiment_queue = None
 
 try:
     pipeline = joblib.load('model/sentiment_model.pkl')
     label_encoder = joblib.load('model/label_encoder.pkl')
     print("Model and label encoder loaded successfully")
 except Exception as e:
-    print(f" Error loading model: {e}")
+    print(f"Error loading model: {e}")
     pipeline = None
     label_encoder = None
 
-# ADD THIS WORKER FUNCTION
-def process_sentiment(review_data):
+def process_sentiment_sync(review_data):
     """
-    Worker function to process sentiment analysis jobs from the queue
-    This function will be called by RQ workers
+    Synchronous sentiment processing function
     """
     try:
         if pipeline is None or label_encoder is None:
             raise Exception("Model not loaded")
         
-        # Extract data
         review_text = review_data.get('text', '')
         movie_name = review_data.get('movie_name', 'Unknown Movie')
         
-        logger.info(f"Processing sentiment for movie: {movie_name}")
+        logger.info(f"🎬 Processing sentiment for: {movie_name}")
         
-        # Clean text
         cleaned_text = clean_text(review_text)
         
         if not cleaned_text.strip():
             raise Exception("Text becomes empty after cleaning")
         
-        # Make prediction
         prediction = pipeline.predict([cleaned_text])[0]
         prediction_proba = pipeline.predict_proba([cleaned_text])[0]
         confidence = float(np.max(prediction_proba))
         sentiment_label = label_encoder.inverse_transform([prediction])[0]
         
-        # Prepare result
         result = {
             "sentiment": sentiment_label,
             "confidence": confidence,
@@ -72,77 +69,91 @@ def process_sentiment(review_data):
             "status": "completed"
         }
         
-        logger.info(f"Completed sentiment analysis for {movie_name}: {sentiment_label}")
+        logger.info(f"✅ Completed: {movie_name} -> {sentiment_label} ({confidence:.2f})")
         return result
         
     except Exception as e:
-        logger.error(f"Error in process_sentiment: {str(e)}")
+        logger.error(f"❌ Error processing {movie_name}: {str(e)}")
         return {
             "error": str(e),
             "status": "failed",
+            "movie_name": movie_name,
             "processed_at": datetime.now().isoformat()
         }
-    
-@app.route('/api/test', methods=['GET'])
-def test():
-    return jsonify({"message": "Backend is working!"})
 
 @app.route('/health', methods=['GET'])
 def health():
     model_status = "loaded" if pipeline is not None else "not_loaded"
+    redis_status = "connected" if redis_conn is not None else "disconnected"
+    
     return jsonify({
         "status": "ML service is running",
         "model_status": model_status,
+        "redis_status": redis_status,
         "service": "sentiment_analysis"
     })
 
 @app.route('/predict', methods=['POST'])
 def predict_sentiment():
+    """Direct prediction endpoint (synchronous)"""
     try:
-        if pipeline is None or label_encoder is None:
-            return jsonify({
-                "error": "Model not loaded."
-            }), 500
         data = request.get_json()
         
-        if not data:
-            return jsonify({"error": "JSON data not provided"}), 400
-        
-        if 'text' not in data:
+        if not data or 'text' not in data:
             return jsonify({"error": "Missing text field in request"}), 400
         
-        review_text = data['text']
-        movie_name = data.get('movie_name', 'Unknown Movie')
+        result = process_sentiment_sync(data)
         
-        cleaned_text = clean_text(review_text)
+        if result.get('status') == 'failed':
+            return jsonify(result), 500
+            
+        return jsonify(result)
         
-        if not cleaned_text.strip():
-            return jsonify({
-                "error": "Text becomes empty after cleaning"
-            }), 400
+    except Exception as e:
+        logger.error(f"Error in predict endpoint: {str(e)}")
+        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
+
+@app.route('/process-batch', methods=['POST'])
+def process_batch():
+    """Process multiple reviews at once"""
+    try:
+        data = request.get_json()
+        reviews = data.get('reviews', [])
         
-        prediction = pipeline.predict([cleaned_text])[0]
+        if not reviews:
+            return jsonify({"error": "No reviews provided"}), 400
         
-        prediction_proba = pipeline.predict_proba([cleaned_text])[0]
-        confidence = float(np.max(prediction_proba))
-        
-        sentiment_label = label_encoder.inverse_transform([prediction])[0]
+        results = []
+        for review_data in reviews:
+            result = process_sentiment_sync(review_data)
+            results.append(result)
         
         return jsonify({
-            "sentiment": sentiment_label,
-            "confidence": confidence,
-            "movie_name": movie_name,
-            "original_text": review_text,
-            "cleaned_text": cleaned_text
+            "results": results,
+            "total_processed": len(results),
+            "success": True
         })
         
     except Exception as e:
-        print(f"Error in prediction: {str(e)}")
-        return jsonify({
-            "error": f"Prediction failed: {str(e)}"
-        }), 500
+        logger.error(f"Error in batch processing: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-''''''''''
+@app.route('/queue/status', methods=['GET'])
+def queue_status():
+    """Check queue status"""
+    try:
+        if not sentiment_queue:
+            return jsonify({"error": "Queue not available"}), 503
+            
+        return jsonify({
+            "queue_length": len(sentiment_queue),
+            "redis_connected": redis_conn is not None,
+            "model_loaded": pipeline is not None
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/model-info', methods=['GET'])
 def model_info():
     if pipeline is None or label_encoder is None:
@@ -160,52 +171,19 @@ def model_info():
             "message": "Model ready for predictions"
         })
     except Exception as e:
-        return jsonify({
-            "error": f"Error getting model info: {str(e)}"
-        }), 500
-'''''''''''
-@app.route('/worker/start', methods=['POST'])
-def start_worker():
-    """Start a worker process (for development/testing)"""
-    try:
-        if redis_conn is None:
-            return jsonify({"error": "Redis not connected"}), 500
-            
-        return jsonify({
-            "message": "Use 'python ml_worker.py' to start worker",
-            "info": "This endpoint is for reference only"
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/worker/status', methods=['GET'])
-def worker_status():
-    """Check worker and queue status"""
-    try:
-        if redis_conn is None:
-            return jsonify({"error": "Redis not connected"}), 500
-            
-        # Get queue info
-        from rq import Queue
-        queue = Queue('sentiment_analysis', connection=redis_conn)
-        
-        return jsonify({
-            "redis_connected": True,
-            "queue_length": len(queue),
-            "failed_jobs": len(queue.failed_job_registry),
-            "model_loaded": pipeline is not None,
-            "service": "ml_worker"
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Error getting model info: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    print("Starting Flask ML Service...")
+    print("Starting Simplified ML Service...")
     print("Model loaded:", pipeline is not None)
     print("Label encoder loaded:", label_encoder is not None)
     print("Redis connected:", redis_conn is not None)
-    print("\nTo start worker: python ml_worker.py")
-    print("To test API: curl http://localhost:8000/health")
+    
+    print("\nAvailable endpoints:")
+    print("  - http://localhost:8000/health")
+    print("  - http://localhost:8000/predict")
+    print("  - http://localhost:8000/process-batch")
+    print("  - http://localhost:8000/queue/status")
+    print("  - http://localhost:8000/model-info")
+    
     app.run(debug=True, port=8000, host='0.0.0.0')
