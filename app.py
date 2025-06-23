@@ -8,22 +8,18 @@ from preprocessing import clean_text
 from rq import Queue
 import redis
 from datetime import datetime
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app) 
 
-# Simple Redis connection (no encoding issues)
+#Reddis
 try:
     redis_conn = redis.Redis(host='localhost', port=6379)
     redis_conn.ping()
-    logger.info("Successfully connected to Redis")
+    print("Successfully connected to Redis")
     sentiment_queue = Queue('sentiment_analysis', connection=redis_conn)
 except Exception as e:
-    logger.error(f"Failed to connect to Redis: {e}")
+    print(f"Failed to connect to Redis: {e}")
     redis_conn = None
     sentiment_queue = None
 
@@ -36,10 +32,7 @@ except Exception as e:
     pipeline = None
     label_encoder = None
 
-def process_sentiment_sync(review_data):
-    """
-    Synchronous sentiment processing function
-    """
+def analyse(review_data):
     try:
         if pipeline is None or label_encoder is None:
             raise Exception("Model not loaded")
@@ -47,7 +40,7 @@ def process_sentiment_sync(review_data):
         review_text = review_data.get('text', '')
         movie_name = review_data.get('movie_name', 'Unknown Movie')
         
-        logger.info(f"🎬 Processing sentiment for: {movie_name}")
+        print(f"Sentiment for: {movie_name}")
         
         cleaned_text = clean_text(review_text)
         
@@ -69,11 +62,10 @@ def process_sentiment_sync(review_data):
             "status": "completed"
         }
         
-        logger.info(f"✅ Completed: {movie_name} -> {sentiment_label} ({confidence:.2f})")
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error processing {movie_name}: {str(e)}")
+        print(f"Error in processing {movie_name}: {str(e)}")
         return {
             "error": str(e),
             "status": "failed",
@@ -94,15 +86,14 @@ def health():
     })
 
 @app.route('/predict', methods=['POST'])
-def predict_sentiment():
-    """Direct prediction endpoint (synchronous)"""
+def sentiment_predict():
     try:
         data = request.get_json()
         
         if not data or 'text' not in data:
             return jsonify({"error": "Missing text field in request"}), 400
         
-        result = process_sentiment_sync(data)
+        result = analyse(data)
         
         if result.get('status') == 'failed':
             return jsonify(result), 500
@@ -110,12 +101,11 @@ def predict_sentiment():
         return jsonify(result)
         
     except Exception as e:
-        logger.error(f"Error in predict endpoint: {str(e)}")
+        print(f"Error in predict : {str(e)}")
         return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
 
 @app.route('/process-batch', methods=['POST'])
 def process_batch():
-    """Process multiple reviews at once"""
     try:
         data = request.get_json()
         reviews = data.get('reviews', [])
@@ -125,7 +115,7 @@ def process_batch():
         
         results = []
         for review_data in reviews:
-            result = process_sentiment_sync(review_data)
+            result = analyse(review_data)
             results.append(result)
         
         return jsonify({
@@ -135,12 +125,11 @@ def process_batch():
         })
         
     except Exception as e:
-        logger.error(f"Error in batch processing: {str(e)}")
+        print(f"Error in batch processing: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/queue/status', methods=['GET'])
 def queue_status():
-    """Check queue status"""
     try:
         if not sentiment_queue:
             return jsonify({"error": "Queue not available"}), 503
@@ -174,10 +163,10 @@ def model_info():
         return jsonify({"error": f"Error getting model info: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    print("Starting Simplified ML Service...")
-    print("Model loaded:", pipeline is not None)
-    print("Label encoder loaded:", label_encoder is not None)
-    print("Redis connected:", redis_conn is not None)
+    print("Starting ML Service")
+    print("Pipeline loaded ")
+    print("Label encoder")
+    print("Redis connection")
     
     print("\nAvailable endpoints:")
     print("  - http://localhost:8000/health")
