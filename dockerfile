@@ -1,7 +1,7 @@
 FROM python:3.11-slim-bookworm
 
 # Create non-root user
-RUN groupadd -r mluser && useradd -r -g mluser mluser
+#RUN groupadd -r mluser && useradd -r -g mluser mluser
 
 WORKDIR /app
 
@@ -34,7 +34,6 @@ RUN mkdir -p /app/model \
     && chown -R mluser:mluser /app \
     && chmod -R 755 /root/nltk_data 2>/dev/null || true
 
-USER mluser
 
 # Expose port
 EXPOSE 8000
