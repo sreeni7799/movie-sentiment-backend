@@ -27,8 +27,9 @@ RUN python -c "import nltk; nltk.download('punkt', quiet=True)" && \
 # Copy ML service code
 COPY app.py .
 COPY preprocessing.py .
+COPY train_model.py .
 COPY model/ ./model/
-
+COPY . .
 # Create necessary directories and fix permissions
 RUN mkdir -p /app/model \
     && chown -R mluser:mluser /app \
